@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -68,7 +70,8 @@ func Open(ctx context.Context, dsn string) (*Store, error) {
 	}
 	path := strings.TrimPrefix(dsn, "sqlite://")
 	if path == "" {
-		path = "demo.db"
+		// Ảnh Docker chạy bằng user không phải root, chỉ thư mục tạm là ghi được.
+		path = filepath.Join(os.TempDir(), "market-demo.db")
 	}
 	// _txlock=immediate: transaction ghi giữ khoá ghi ngay từ BEGIN, tương đương SELECT … FOR UPDATE bên MySQL.
 	db, err := sql.Open("sqlite", "file:"+path+"?_txlock=immediate&_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)")
