@@ -1,48 +1,102 @@
 // Package feeder chạy bộ sinh giá: mỗi bước sinh tick, cập nhật bảng giá và nến, ghi vào Redis.
-// Chỉ chạy MỘT bộ sinh giá; các máy chủ WebSocket nhận giá qua Redis nên chạy bao nhiêu bản cũng được.
+// Tại một thời điểm chỉ MỘT bộ sinh giá được ghi (khoá trong Redis); các máy chủ WebSocket nhận giá
+// qua Redis nên chạy bao nhiêu bản cũng được.
 package feeder
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"log/slog"
+	"os"
 	"time"
 
 	"github.com/LEO17061996/market-stream-go/internal/bus"
 	"github.com/LEO17061996/market-stream-go/internal/market"
 )
 
+const leaderTTL = 3 * time.Second
+
 type Config struct {
-	Seed         uint64
-	Interval     time.Duration
-	HistoryBars  int
-	CandleFrame  time.Duration
-	Now          func() time.Time
+	Seed        uint64
+	Interval    time.Duration
+	HistoryBars int
+	CandleFrame time.Duration
+	Now         func() time.Time
+	ID          string // định danh bộ sinh giá khi giành khoá; trống thì tự sinh
 }
 
+// Run chờ tới lượt giữ khoá rồi mới sinh giá; mất khoá (bản khác chiếm khi mạng chập chờn) thì dừng ghi và chờ lại.
 func Run(ctx context.Context, b *bus.Bus, cfg Config, log *slog.Logger) error {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
+	if cfg.ID == "" {
+		cfg.ID = newID()
+	}
+	defer b.ReleaseLeader(context.Background(), cfg.ID)
+	waiting := false
+	for ctx.Err() == nil {
+		ok, err := b.HoldLeader(ctx, cfg.ID, leaderTTL)
+		if err != nil || !ok {
+			if !waiting {
+				log.Info("bộ sinh giá khác đang ghi, chờ tới lượt", "id", cfg.ID)
+				waiting = true
+			}
+			sleep(ctx, time.Second)
+			continue
+		}
+		waiting = false
+		log.Info("giữ quyền ghi giá", "id", cfg.ID)
+		if err := lead(ctx, b, cfg, log); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// lead sinh giá cho tới khi ctx kết thúc hoặc mất khoá.
+func lead(ctx context.Context, b *bus.Bus, cfg Config, log *slog.Logger) error {
 	f := market.NewFeed(cfg.Seed)
 	book := market.NewQuoteBook()
 	agg := market.NewAggregator(cfg.CandleFrame)
-
 	if err := restoreOrSeed(ctx, b, cfg, f, book, agg, log); err != nil {
 		return err
 	}
 
 	t := time.NewTicker(cfg.Interval)
 	defer t.Stop()
+	renew := time.NewTicker(leaderTTL / 3)
+	defer renew.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
+		case <-renew.C:
+			if ok, err := b.HoldLeader(ctx, cfg.ID, leaderTTL); !ok && ctx.Err() == nil {
+				log.Warn("mất quyền ghi giá, dừng ghi", "err", err)
+				return nil
+			}
 		case <-t.C:
 			u := step(f, book, agg, cfg.Now())
 			if err := b.Write(ctx, u); err != nil && ctx.Err() == nil {
 				log.Warn("ghi Redis lỗi, bỏ bước này", "err", err)
 			}
 		}
+	}
+}
+
+func newID() string {
+	host, _ := os.Hostname()
+	buf := make([]byte, 4)
+	_, _ = rand.Read(buf)
+	return host + "-" + hex.EncodeToString(buf)
+}
+
+func sleep(ctx context.Context, d time.Duration) {
+	select {
+	case <-ctx.Done():
+	case <-time.After(d):
 	}
 }
 

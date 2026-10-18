@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"time"
 
 	"github.com/redis/go-redis/v9"
 
@@ -155,6 +156,27 @@ func (b *Bus) SeedHistory(ctx context.Context, hist map[string][]market.Candle, 
 	}
 	_, err := pipe.Exec(ctx)
 	return err
+}
+
+const keyLeader = "md:feed:leader"
+
+var renewLeader = redis.NewScript(`if redis.call("GET", KEYS[1]) == ARGV[1] then return redis.call("PEXPIRE", KEYS[1], ARGV[2]) else return 0 end`)
+var releaseLeader = redis.NewScript(`if redis.call("GET", KEYS[1]) == ARGV[1] then return redis.call("DEL", KEYS[1]) else return 0 end`)
+
+// HoldLeader giành hoặc gia hạn quyền ghi giá. Chỉ một bộ sinh giá được ghi tại một thời điểm,
+// kể cả khi hai bản chạy chồng nhau lúc deploy; bản kia chờ và tiếp quản khi khoá hết hạn.
+func (b *Bus) HoldLeader(ctx context.Context, id string, ttl time.Duration) (bool, error) {
+	ok, err := b.rdb.SetNX(ctx, keyLeader, id, ttl).Result()
+	if err != nil || ok {
+		return ok, err
+	}
+	n, err := renewLeader.Run(ctx, b.rdb, []string{keyLeader}, id, ttl.Milliseconds()).Int()
+	return n == 1, err
+}
+
+// ReleaseLeader trả khoá khi dừng êm để bản khác tiếp quản ngay, không phải chờ hết hạn.
+func (b *Bus) ReleaseLeader(ctx context.Context, id string) error {
+	return releaseLeader.Run(ctx, b.rdb, []string{keyLeader}, id).Err()
 }
 
 func (b *Bus) Subscribe(ctx context.Context) *redis.PubSub {

@@ -30,7 +30,7 @@ cmd/feed ──► Redis ──pub/sub──► cmd/server (×N) ──WebSocket
 
 | Phần | Làm gì | File |
 |---|---|---|
-| Bộ sinh giá | Chuyển động Brown hình học, làm tròn theo bước giá từng hợp đồng; khởi động lại thì nối tiếp giá cũ trong Redis, Redis trống thì sinh 300 nến lịch sử | `internal/market`, `internal/feeder` |
+| Bộ sinh giá | Chuyển động Brown hình học, làm tròn theo bước giá từng hợp đồng; khởi động lại thì nối tiếp giá cũ trong Redis, Redis trống thì sinh 300 nến lịch sử. **Khoá trong Redis** (`SET NX` + gia hạn bằng Lua) để chỉ một bộ được ghi, kể cả khi hai bản chạy chồng lúc deploy | `internal/market`, `internal/feeder` |
 | Redis | Mỗi bước ghi bảng giá (hash), nến (list giới hạn 600), phát tick (pub/sub) trong một `MULTI/EXEC`; cache bảng giá cho REST; phiên đăng nhập; giới hạn đăng nhập sai | `internal/bus`, `internal/auth` |
 | WebSocket | Mỗi máy chủ nghe Redis một lần rồi phát cho mọi client; client theo dõi tất cả dùng chung một bản JSON mã hoá sẵn, client chỉ theo dõi vài mã thì lọc riêng; **client đọc chậm bị ngắt** để không làm chậm người khác; ping 25 s, đo độ trễ khứ hồi; chỉ nhận kết nối cùng nguồn gốc | `internal/stream` |
 | REST API | Danh mục, bảng giá, nến, tính ký quỹ theo giá và tỷ giá mới nhất, đăng nhập, tài khoản, lịch sử, yêu cầu rút | `internal/api` |
@@ -55,6 +55,7 @@ Các ca chính:
 - Giá luôn nằm trên bước giá (kể cả bước 0,25 và 0,0005), cùng seed thì cùng chuỗi giá; nến mới mở bằng giá đóng nến trước, tick đến muộn không sửa nến đã đóng; bảng giá mở cửa lại lúc 0 giờ Việt Nam.
 - Đầu cuối: ghi tick vào Redis → hub nghe pub/sub → client WebSocket nhận đúng mã đã theo dõi; ping/pong; trang khác nguồn gốc bị từ chối.
 - Client đọc chậm bị ngắt mà client khác vẫn nhận đủ; gửi tin cho client vừa bị gỡ không panic.
+- Hai bộ sinh giá chạy cùng lúc: chỉ bộ giữ khoá được ghi; bộ đó dừng thì bộ kia tiếp quản.
 - 10 yêu cầu rút gửi cùng lúc, số dư đủ cho 4: đúng 4 thành công, 6 bị từ chối, không âm.
 - Phân trang theo khoá đi qua 202 giao dịch, mỗi dòng đúng một lần.
 - Đăng nhập: sai mật khẩu và sai tên trả cùng lỗi; quá 10 lần trong 10 phút bị chặn kể cả đúng mật khẩu; đăng xuất thì phiên mất hiệu lực; POST không phải JSON bị chặn.
