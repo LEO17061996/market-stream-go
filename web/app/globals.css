@@ -1,0 +1,61 @@
+@import "tailwindcss";
+
+:root {
+  --bg: #0d1117;
+  --card: #151b23;
+  --ink: #e6edf3;
+  --muted: #8b949e;
+  --line: #262d36;
+  --grid: #1c232c;
+  --hover: #1f2731;
+  --up: #16c784;
+  --down: #ea3943;
+  --accent: #3b82f6;
+  color-scheme: dark;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+}
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 12px;
+  min-width: 0;
+}
+
+.input {
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+  color: var(--ink);
+  font: inherit;
+}
+
+.btn {
+  background: var(--accent);
+  color: white;
+  border-radius: 8px;
+  padding: 8px 14px;
+  font-weight: 600;
+}
+.btn:disabled {
+  opacity: 0.5;
+}
+
+@keyframes flash-up {
+  from { background: color-mix(in srgb, var(--up) 45%, transparent); }
+  to { background: transparent; }
+}
+@keyframes flash-down {
+  from { background: color-mix(in srgb, var(--down) 45%, transparent); }
+  to { background: transparent; }
+}
+.flash-up { animation: flash-up 0.8s ease-out; }
+.flash-down { animation: flash-down 0.8s ease-out; }

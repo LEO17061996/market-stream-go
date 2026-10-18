@@ -1,0 +1,6 @@
+*.db
+*.db-shm
+*.db-wal
+/server
+/feed
+*.exe
