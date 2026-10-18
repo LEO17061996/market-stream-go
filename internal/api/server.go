@@ -24,6 +24,10 @@ import (
 
 const cookieName = "sid"
 
+// Lưu ý: mọi lời gọi xuống Redis/CSDL dùng c.Request.Context(), không dùng chính *gin.Context.
+// Gin tái sử dụng Context cho request sau, trong khi database/sql giữ một goroutine theo dõi context
+// của transaction; truyền *gin.Context vào đó là lỗi đua dữ liệu (go test -race đã bắt được).
+
 type Server struct {
 	Bus      *bus.Bus
 	Hub      *stream.Hub
@@ -81,7 +85,7 @@ func fail(c *gin.Context, code int, msg string) {
 }
 
 func (s *Server) health(c *gin.Context) {
-	ctx, cancel := context.WithTimeout(c, 2*time.Second)
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 2*time.Second)
 	defer cancel()
 	redisOK := s.Bus.Client().Ping(ctx).Err() == nil
 	dbOK := s.Store.Ping(ctx) == nil
@@ -98,7 +102,7 @@ func (s *Server) instruments(c *gin.Context) {
 }
 
 func (s *Server) quotes(c *gin.Context) {
-	qs, err := s.Bus.Quotes(c)
+	qs, err := s.Bus.Quotes(c.Request.Context())
 	if err != nil {
 		fail(c, http.StatusServiceUnavailable, "Không đọc được bảng giá")
 		return
@@ -119,7 +123,7 @@ func (s *Server) candles(c *gin.Context) {
 		return
 	}
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "300"))
-	cs, err := s.Bus.Candles(c, sym, limit)
+	cs, err := s.Bus.Candles(c.Request.Context(), sym, limit)
 	if err != nil {
 		fail(c, http.StatusServiceUnavailable, "Không đọc được dữ liệu nến")
 		return
@@ -148,7 +152,7 @@ func (s *Server) margin(c *gin.Context) {
 		fail(c, http.StatusBadRequest, "Số hợp đồng phải là số nguyên từ 1 đến 1000")
 		return
 	}
-	qs, err := s.Bus.Quotes(c)
+	qs, err := s.Bus.Quotes(c.Request.Context())
 	if err != nil || qs[in.Symbol].Price == 0 || qs[market.USDVND].Price == 0 {
 		fail(c, http.StatusServiceUnavailable, "Chưa có giá để tính")
 		return
@@ -156,7 +160,7 @@ func (s *Server) margin(c *gin.Context) {
 	m := market.CalcMargin(in, req.Lots, qs[in.Symbol].Price, qs[market.USDVND].Price)
 	resp := gin.H{"margin": m}
 	if uid, ok := c.Get("userID"); ok {
-		if acc, err := s.Store.AccountByUser(c, uid.(int64)); err == nil {
+		if acc, err := s.Store.AccountByUser(c.Request.Context(), uid.(int64)); err == nil {
 			perLot := market.CalcMargin(in, 1, m.Price, m.USDVND).MarginVND
 			resp["availableVND"] = acc.AvailableVND
 			resp["maxLots"] = acc.AvailableVND / perLot
@@ -177,7 +181,7 @@ func (s *Server) login(c *gin.Context) {
 		return
 	}
 	ip := c.ClientIP()
-	allowed, err := s.Sessions.AllowLogin(c, ip)
+	allowed, err := s.Sessions.AllowLogin(c.Request.Context(), ip)
 	if err != nil {
 		fail(c, http.StatusServiceUnavailable, "Hệ thống tạm thời không đăng nhập được")
 		return
@@ -186,9 +190,9 @@ func (s *Server) login(c *gin.Context) {
 		fail(c, http.StatusTooManyRequests, "Thử sai quá nhiều lần, vui lòng đợi 10 phút")
 		return
 	}
-	u, err := s.Store.Authenticate(c, req.Username, req.Password)
+	u, err := s.Store.Authenticate(c.Request.Context(), req.Username, req.Password)
 	if errors.Is(err, store.ErrBadCredentials) {
-		s.Store.Audit(c, 0, "login_failed", ip, req.Username)
+		s.Store.Audit(c.Request.Context(), 0, "login_failed", ip, req.Username)
 		fail(c, http.StatusUnauthorized, err.Error())
 		return
 	}
@@ -196,20 +200,20 @@ func (s *Server) login(c *gin.Context) {
 		fail(c, http.StatusInternalServerError, "Lỗi hệ thống")
 		return
 	}
-	token, err := s.Sessions.Create(c, u.ID)
+	token, err := s.Sessions.Create(c.Request.Context(), u.ID)
 	if err != nil {
 		fail(c, http.StatusServiceUnavailable, "Không tạo được phiên đăng nhập")
 		return
 	}
-	s.Sessions.ResetLogin(c, ip)
-	s.Store.Audit(c, u.ID, "login", ip, "")
+	s.Sessions.ResetLogin(c.Request.Context(), ip)
+	s.Store.Audit(c.Request.Context(), u.ID, "login", ip, "")
 	s.setCookie(c, token, int(s.Sessions.TTL.Seconds()))
 	c.JSON(http.StatusOK, u)
 }
 
 func (s *Server) logout(c *gin.Context) {
 	if token, err := c.Cookie(cookieName); err == nil {
-		_ = s.Sessions.Delete(c, token)
+		_ = s.Sessions.Delete(c.Request.Context(), token)
 	}
 	s.setCookie(c, "", -1)
 	c.Status(http.StatusNoContent)
@@ -226,7 +230,7 @@ func (s *Server) userFromCookie(c *gin.Context) (int64, error) {
 	if err != nil {
 		return 0, auth.ErrNoSession
 	}
-	return s.Sessions.Lookup(c, token)
+	return s.Sessions.Lookup(c.Request.Context(), token)
 }
 
 func (s *Server) optionalUser(c *gin.Context) {
@@ -248,12 +252,12 @@ func (s *Server) requireUser(c *gin.Context) {
 
 func (s *Server) me(c *gin.Context) {
 	uid := c.GetInt64("userID")
-	u, err := s.Store.UserByID(c, uid)
+	u, err := s.Store.UserByID(c.Request.Context(), uid)
 	if err != nil {
 		fail(c, http.StatusUnauthorized, auth.ErrNoSession.Error())
 		return
 	}
-	acc, err := s.Store.AccountByUser(c, uid)
+	acc, err := s.Store.AccountByUser(c.Request.Context(), uid)
 	if err != nil {
 		fail(c, http.StatusInternalServerError, "Không đọc được tài khoản")
 		return
@@ -262,14 +266,14 @@ func (s *Server) me(c *gin.Context) {
 }
 
 func (s *Server) transactions(c *gin.Context) {
-	acc, err := s.Store.AccountByUser(c, c.GetInt64("userID"))
+	acc, err := s.Store.AccountByUser(c.Request.Context(), c.GetInt64("userID"))
 	if err != nil {
 		fail(c, http.StatusInternalServerError, "Không đọc được tài khoản")
 		return
 	}
 	before, _ := strconv.ParseInt(c.Query("before"), 10, 64)
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "20"))
-	items, err := s.Store.Transactions(c, acc.ID, before, limit)
+	items, err := s.Store.Transactions(c.Request.Context(), acc.ID, before, limit)
 	if err != nil {
 		fail(c, http.StatusInternalServerError, "Không đọc được lịch sử")
 		return
@@ -301,7 +305,7 @@ func (s *Server) withdraw(c *gin.Context) {
 	if note == "" {
 		note = "Rút về tài khoản ngân hàng"
 	}
-	t, err := s.Store.RequestWithdrawal(c, uid, req.AmountVND, note)
+	t, err := s.Store.RequestWithdrawal(c.Request.Context(), uid, req.AmountVND, note)
 	if errors.Is(err, store.ErrInsufficient) {
 		fail(c, http.StatusConflict, err.Error())
 		return
@@ -310,7 +314,7 @@ func (s *Server) withdraw(c *gin.Context) {
 		fail(c, http.StatusInternalServerError, "Không tạo được yêu cầu rút")
 		return
 	}
-	s.Store.Audit(c, uid, "withdraw_request", c.ClientIP(), strconv.FormatInt(req.AmountVND, 10))
+	s.Store.Audit(c.Request.Context(), uid, "withdraw_request", c.ClientIP(), strconv.FormatInt(req.AmountVND, 10))
 	c.JSON(http.StatusCreated, t)
 }
 
